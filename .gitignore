@@ -3,3 +3,4 @@
 *.exe~
 .env
 .larkpan-cache
+larkpan-gui.exe
