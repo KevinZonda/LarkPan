@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -304,6 +305,23 @@ func clientCmd(ctx context.Context) {
 		must(err)
 		fmt.Printf("mounting %s at %s (ctrl-c to unmount)\n", cfg.Server, os.Args[3])
 		must(mount.Mount(&mount.Client{Base: cfg.Server, Token: cfg.Token}, os.Args[3]))
+	case "refresh":
+		cfg, err := client.Load()
+		must(err)
+		req, err := http.NewRequest(http.MethodGet, cfg.Server+"/refresh", nil)
+		must(err)
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+		resp, err := http.DefaultClient.Do(req)
+		must(err)
+		defer resp.Body.Close()
+		var out struct {
+			Token   string `json:"token"`
+			Expires int64  `json:"expires"`
+		}
+		must(json.NewDecoder(resp.Body).Decode(&out))
+		cfg.Token = out.Token
+		must(cfg.Save())
+		fmt.Println("refreshed, expires", time.Unix(out.Expires, 0))
 	case "whoami":
 		cfg, err := client.Load()
 		must(err)

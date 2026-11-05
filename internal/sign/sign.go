@@ -50,6 +50,20 @@ func ClientToken(secret, label string, expiresAt int64) string {
 	return "lp_" + label + "_" + strconv.FormatInt(expiresAt, 10) + "_" + sig
 }
 
+// BearerLabel extracts the label from an lp_ token without verifying it.
+// Returns "" when the token is malformed.
+func BearerLabel(token string) string {
+	rest, ok := strings.CutPrefix(token, "lp_")
+	if !ok {
+		return ""
+	}
+	parts := strings.Split(rest, "_")
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.Join(parts[:len(parts)-2], "_")
+}
+
 // ValidBearer reports whether the Authorization bearer token is a live
 // client token under secret.
 func ValidBearer(secret, token string, now time.Time) bool {

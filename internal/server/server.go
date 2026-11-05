@@ -44,6 +44,7 @@ func New(cache *drive.Cache, rootFolderToken, secret string, vend *TokenVender) 
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
 	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
+	s.mux.HandleFunc("/refresh", s.guard(s.handleRefresh))
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
 	// WebDAV mount point (read-only): net use Z: http://host/dav/
@@ -98,6 +99,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// handleRefresh re-signs a live bearer token with a fresh 30d expiry.
+// Only reachable past guard() — an expired token cannot refresh.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	b := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	label := sign.BearerLabel(b)
+	if label == "" {
+		http.Error(w, "malformed token", http.StatusBadRequest)
+		return
+	}
+	exp := time.Now().Add(30 * 24 * time.Hour).Unix()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":   sign.ClientToken(s.secret, label, exp),
+		"expires": exp,
+	})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
