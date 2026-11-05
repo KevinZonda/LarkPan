@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 
 	larkdrive "github.com/larksuite/oapi-sdk-go/v3/service/drive/v1"
 )
@@ -86,27 +89,74 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 	blockSize := int64(*prep.Data.BlockSize)
 	blockNum := *prep.Data.BlockNum
 
+	// Upload parts concurrently. The first failure cancels the rest and is
+	// returned after all in-flight parts settle.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sem := make(chan struct{}, min(c.uploadConcurrency, blockNum))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	fail := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
+		cancel()
+	}
+	failed := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr != nil
+	}
+
 	for seq := 0; seq < blockNum; seq++ {
-		want := min(blockSize, size-int64(seq)*blockSize)
-		buf := make([]byte, want)
-		if _, err := f.ReadAt(buf, int64(seq)*blockSize); err != nil {
-			return nil, fmt.Errorf("read block %d: %w", seq, err)
+		if failed() {
+			break
 		}
-		resp, err := c.raw.Drive.File.UploadPart(ctx, larkdrive.NewUploadPartFileReqBuilder().
-			Body(larkdrive.NewUploadPartFileReqBodyBuilder().
-				UploadId(uploadID).
-				Seq(seq).
-				Size(int(want)).
-				Checksum(adlerSum(buf)).
-				File(bytes.NewReader(buf)).
-				Build()).
-			Build())
-		if err != nil {
-			return nil, err
-		}
-		if err := apiErr(resp.CodeError); err != nil {
-			return nil, fmt.Errorf("upload part %d/%d: %w", seq+1, blockNum, err)
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(seq int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			want := min(blockSize, size-int64(seq)*blockSize)
+			buf := make([]byte, want)
+			if _, err := f.ReadAt(buf, int64(seq)*blockSize); err != nil {
+				fail(fmt.Errorf("read block %d: %w", seq, err))
+				return
+			}
+			for attempt := 0; ; attempt++ {
+				resp, err := c.raw.Drive.File.UploadPart(ctx, larkdrive.NewUploadPartFileReqBuilder().
+					Body(larkdrive.NewUploadPartFileReqBodyBuilder().
+						UploadId(uploadID).
+						Seq(seq).
+						Size(int(want)).
+						Checksum(adlerSum(buf)).
+						File(bytes.NewReader(buf)).
+						Build()).
+					Build())
+				if err == nil && resp.Code == 0 {
+					break
+				}
+				if !isRateLimited(resp, err) || attempt >= 3 {
+					if err == nil {
+						err = apiErr(resp.CodeError)
+					}
+					fail(fmt.Errorf("upload part %d/%d: %w", seq+1, blockNum, err))
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(1<<attempt) * time.Second):
+				}
+			}
+		}(seq)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	fin, err := c.raw.Drive.File.UploadFinish(ctx, larkdrive.NewUploadFinishFileReqBuilder().
@@ -126,6 +176,15 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 		res.Version = *fin.Data.Version
 	}
 	return res, nil
+}
+
+// isRateLimited reports whether a failed part upload was throttled.
+// Feishu signals per-API frequency caps with code 99991400.
+func isRateLimited(resp *larkdrive.UploadPartFileResp, err error) bool {
+	if resp != nil && resp.Code == 99991400 {
+		return true
+	}
+	return err != nil && strings.Contains(err.Error(), "frequency limit")
 }
 
 // adlerSum returns the Adler-32 checksum the drive API expects, decimal.

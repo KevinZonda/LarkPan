@@ -10,9 +10,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"larkpan/internal/drive"
+	"larkpan/internal/server"
 )
 
 func usage() {
@@ -24,6 +28,16 @@ commands:
   upload   <file> [folder_token]     upload a file (auto-chunks >20MB)
   download <file_token> [output]     download a file
   rm       <token> [type]            delete a resource (type: file, folder, ...)
+  pull     <folder_token> <dir> [mode]
+                                     mirror remote tree into local dir
+                                     mode: smart (default) | skip | overwrite
+  get      <folder_token> <rel_path>
+                                     resolve + cache file, print local path
+                                     (read-through cache; LARK_CACHE_DIR, LARK_META_TTL)
+  serve    <folder_token> [addr]     serve the tree over HTTP
+                                     /files/<path>  nginx-style files + JSON dir listing
+                                     /s3/<bucket>/<key>  minimal S3 (bucket ignored, unauthenticated)
+                                     default addr :8080
 `)
 	os.Exit(2)
 }
@@ -87,9 +101,65 @@ func main() {
 			typ = os.Args[3]
 		}
 		must(c.Delete(ctx, os.Args[2], typ))
+	case "pull":
+		if len(os.Args) < 4 {
+			usage()
+		}
+		mode := drive.PullSmart
+		if len(os.Args) > 4 {
+			mode = drive.PullMode(os.Args[4])
+		}
+		res, err := c.Pull(ctx, os.Args[2], os.Args[3], mode)
+		must(err)
+		for _, e := range res.Errors {
+			fmt.Fprintf(os.Stderr, "failed: %s: %v\n", e.RelPath, e.Err)
+		}
+		fmt.Printf("downloaded=%d skipped=%d failed=%d conflicts=%d\n",
+			res.Downloaded, res.Skipped, res.Failed, res.Conflicts)
+		if res.Failed > 0 {
+			os.Exit(1)
+		}
+	case "get":
+		if len(os.Args) < 4 {
+			usage()
+		}
+		cache, err := newCache(c)
+		must(err)
+		p, err := cache.Get(ctx, os.Args[2], os.Args[3])
+		must(err)
+		fmt.Println(p)
+	case "serve":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		addr := ":8080"
+		if len(os.Args) > 3 {
+			addr = os.Args[3]
+		}
+		cache, err := newCache(c)
+		must(err)
+		srv := server.New(cache, os.Args[2])
+		fmt.Printf("serving %s on %s\n", os.Args[2], addr)
+		must(http.ListenAndServe(addr, srv))
 	default:
 		usage()
 	}
+}
+
+// newCache builds the read-through cache from env:
+// LARK_CACHE_DIR (default ./.larkpan-cache), LARK_META_TTL seconds (default 30).
+func newCache(c *drive.Client) (*drive.Cache, error) {
+	dir := os.Getenv("LARK_CACHE_DIR")
+	if dir == "" {
+		dir = ".larkpan-cache"
+	}
+	ttl := 30.0
+	if s := os.Getenv("LARK_META_TTL"); s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil {
+			ttl = v
+		}
+	}
+	return drive.NewCache(c, dir, time.Duration(ttl*float64(time.Second)))
 }
 
 func val(s *string) string {

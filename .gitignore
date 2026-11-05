@@ -1,3 +1,5 @@
 /larkpan
 /larkpan.exe
+*.exe~
 .env
+.larkpan-cache
