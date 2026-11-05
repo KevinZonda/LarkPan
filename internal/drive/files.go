@@ -24,6 +24,10 @@ func apiErr(resp larkcore.CodeError) error {
 // ListFolder lists the direct children of a Drive folder, following pagination.
 // An empty folderToken lists the app's own root directory listing.
 func (c *Client) ListFolder(ctx context.Context, folderToken string) ([]*larkdrive.File, error) {
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var out []*larkdrive.File
 	pageToken := ""
 	for {
@@ -31,7 +35,7 @@ func (c *Client) ListFolder(ctx context.Context, folderToken string) ([]*larkdri
 			FolderToken(folderToken).
 			PageSize(200).
 			PageToken(pageToken).
-			Build())
+			Build(), opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -48,12 +52,16 @@ func (c *Client) ListFolder(ctx context.Context, folderToken string) ([]*larkdri
 
 // CreateFolder creates a folder named name under parentToken ("" = root).
 func (c *Client) CreateFolder(ctx context.Context, name, parentToken string) (string, error) {
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return "", err
+	}
 	resp, err := c.raw.Drive.File.CreateFolder(ctx, larkdrive.NewCreateFolderFileReqBuilder().
 		Body(larkdrive.NewCreateFolderFileReqBodyBuilder().
 			Name(name).
 			FolderToken(parentToken).
 			Build()).
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return "", err
 	}
@@ -67,11 +75,15 @@ func (c *Client) CreateFolder(ctx context.Context, name, parentToken string) (st
 // "file" for binaries, "folder" for folders, plus doc/sheet/etc.
 // Folder deletes run async server-side (Async=true).
 func (c *Client) Delete(ctx context.Context, token, typ string) error {
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return err
+	}
 	resp, err := c.raw.Drive.File.Delete(ctx, larkdrive.NewDeleteFileReqBuilder().
 		FileToken(token).
 		Type(typ).
 		Async(typ == "folder").
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return err
 	}
@@ -80,9 +92,13 @@ func (c *Client) Delete(ctx context.Context, token, typ string) error {
 
 // Download streams a Drive file to a local path.
 func (c *Client) Download(ctx context.Context, fileToken, dstPath string) error {
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return err
+	}
 	resp, err := c.raw.Drive.File.Download(ctx, larkdrive.NewDownloadFileReqBuilder().
 		FileToken(fileToken).
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return err
 	}

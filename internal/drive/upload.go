@@ -51,6 +51,10 @@ func (c *Client) uploadAll(ctx context.Context, r io.Reader, size int64, name, f
 	if err != nil {
 		return nil, err
 	}
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.raw.Drive.File.UploadAll(ctx, larkdrive.NewUploadAllFileReqBuilder().
 		Body(larkdrive.NewUploadAllFileReqBodyBuilder().
 			FileName(name).
@@ -60,7 +64,7 @@ func (c *Client) uploadAll(ctx context.Context, r io.Reader, size int64, name, f
 			Checksum(adlerSum(buf)).
 			File(bytes.NewReader(buf)).
 			Build()).
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +75,10 @@ func (c *Client) uploadAll(ctx context.Context, r io.Reader, size int64, name, f
 }
 
 func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name, folderToken string) (*UploadResult, error) {
+	opts, err := c.reqOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
 	prep, err := c.raw.Drive.File.UploadPrepare(ctx, larkdrive.NewUploadPrepareFileReqBuilder().
 		FileUploadInfo(larkdrive.NewFileUploadInfoBuilder().
 			FileName(name).
@@ -78,7 +86,7 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 			ParentNode(folderToken).
 			Size(int(size)).
 			Build()).
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +135,11 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 				return
 			}
 			for attempt := 0; ; attempt++ {
+				popts, perr := c.reqOpts(ctx)
+				if perr != nil {
+					fail(fmt.Errorf("upload part %d/%d: %w", seq+1, blockNum, perr))
+					return
+				}
 				resp, err := c.raw.Drive.File.UploadPart(ctx, larkdrive.NewUploadPartFileReqBuilder().
 					Body(larkdrive.NewUploadPartFileReqBodyBuilder().
 						UploadId(uploadID).
@@ -135,7 +148,7 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 						Checksum(adlerSum(buf)).
 						File(bytes.NewReader(buf)).
 						Build()).
-					Build())
+					Build(), popts...)
 				if err == nil && resp.Code == 0 {
 					break
 				}
@@ -164,7 +177,7 @@ func (c *Client) uploadChunked(ctx context.Context, f *os.File, size int64, name
 			UploadId(uploadID).
 			BlockNum(blockNum).
 			Build()).
-		Build())
+		Build(), opts...)
 	if err != nil {
 		return nil, err
 	}

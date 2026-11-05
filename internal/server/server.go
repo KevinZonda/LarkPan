@@ -20,24 +20,39 @@ import (
 	"time"
 
 	"larkpan/internal/drive"
+	"larkpan/internal/sign"
 )
 
 // Server serves a single remote Drive folder tree.
 type Server struct {
-	cache *drive.Cache
-	root  string // root folder token
-	mux   *http.ServeMux
+	cache  *drive.Cache
+	root   string // root folder token
+	secret string // edge signing secret; "" = open access
+	mux    *http.ServeMux
 }
 
 // New builds a Server exposing the tree rooted at rootFolderToken.
-func New(cache *drive.Cache, rootFolderToken string) *Server {
-	s := &Server{cache: cache, root: rootFolderToken, mux: http.NewServeMux()}
+// secret enables signed-URL auth on /files/ ("" = open access).
+// /s3/ stays unauthenticated — protect it with a network boundary.
+func New(cache *drive.Cache, rootFolderToken, secret string) *Server {
+	s := &Server{cache: cache, root: rootFolderToken, secret: secret, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.health)
-	s.mux.HandleFunc("/files/", s.handleFiles)
-	s.mux.HandleFunc("/json/", s.handleJSON)
+	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
+	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
 	return s
+}
+
+// guard enforces signed-URL auth when a secret is configured.
+func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.secret != "" && !sign.Valid(s.secret, r, time.Now()) {
+			http.Error(w, "invalid or expired signature", http.StatusUnauthorized)
+			return
+		}
+		h(w, r)
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

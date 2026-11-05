@@ -3,11 +3,13 @@
 package drive
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
 // Client wraps the lark SDK client scoped to Drive operations.
@@ -15,6 +17,7 @@ type Client struct {
 	raw                 *lark.Client
 	uploadConcurrency   int
 	downloadConcurrency int
+	ts                  tokenSource // non-nil in delegated-token mode
 }
 
 // Options controls client construction.
@@ -53,15 +56,51 @@ func New(appID, appSecret string, opts Options) (*Client, error) {
 	}, nil
 }
 
-// NewFromEnv builds a Client from LARK_APP_ID / LARK_APP_SECRET / LARK_DOMAIN /
+// NewFromEnv builds a Client. Credential precedence:
+//
+//	LARK_TENANT_TOKEN   - delegated token mode (sub-server, static token)
+//	LARK_TOKEN_URL      - delegated token mode (fetches {tenant_access_token,
+//	                      expire} JSON from a central vend endpoint, auto-refresh)
+//	LARK_APP_ID/SECRET  - central/publisher mode (mints its own tokens)
+//
+// LARK_DOMAIN selects feishu (default) vs lark; concurrency via
 // LARK_UPLOAD_CONCURRENCY / LARK_DOWNLOAD_CONCURRENCY.
 func NewFromEnv() (*Client, error) {
 	uconc, _ := strconv.Atoi(os.Getenv("LARK_UPLOAD_CONCURRENCY"))
 	dconc, _ := strconv.Atoi(os.Getenv("LARK_DOWNLOAD_CONCURRENCY"))
-	return New(os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"),
-		Options{
-			Domain:              os.Getenv("LARK_DOMAIN"),
-			UploadConcurrency:   uconc,
-			DownloadConcurrency: dconc,
-		})
+	opts := Options{
+		Domain:              os.Getenv("LARK_DOMAIN"),
+		UploadConcurrency:   uconc,
+		DownloadConcurrency: dconc,
+	}
+	if t := os.Getenv("LARK_TENANT_TOKEN"); t != "" {
+		return NewToken(staticToken{s: t}, opts)
+	}
+	if u := os.Getenv("LARK_TOKEN_URL"); u != "" {
+		return NewToken(newRemoteTokenSource(u), opts)
+	}
+	return New(os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"), opts)
+}
+
+// NewToken builds a Client that injects a delegated tenant_access_token on
+// every request instead of minting one from app credentials.
+func NewToken(ts tokenSource, opts Options) (*Client, error) {
+	c, err := New("token-mode", "token-mode", opts)
+	if err != nil {
+		return nil, err
+	}
+	c.ts = ts
+	return c, nil
+}
+
+// reqOpts returns request options carrying the delegated token, if any.
+func (c *Client) reqOpts(ctx context.Context) ([]larkcore.RequestOptionFunc, error) {
+	if c.ts == nil {
+		return nil, nil
+	}
+	t, err := c.ts.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []larkcore.RequestOptionFunc{larkcore.WithTenantAccessToken(t)}, nil
 }

@@ -13,10 +13,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"larkpan/internal/drive"
 	"larkpan/internal/server"
+	"larkpan/internal/sign"
 )
 
 func usage() {
@@ -38,6 +40,16 @@ commands:
                                      /files/<path>  nginx-style files + JSON dir listing
                                      /s3/<bucket>/<key>  minimal S3 (bucket ignored, unauthenticated)
                                      default addr :8080
+  token                            print a fresh tenant_access_token
+  token-serve [addr]               vend tokens to sub-servers (GET /token)
+                                     default addr :9090; auth: APP_ID/SECRET env
+  sign     <path> [ttl_seconds]    emit a signed /files/ URL (default ttl 3600)
+                                     requires LARKPAN_SIGN_SECRET; serve uses
+                                     the same env to enforce signatures
+
+credential modes (sub-servers):
+  LARK_TENANT_TOKEN=t-...          use a delegated token directly
+  LARK_TOKEN_URL=http://host:9090  fetch+refresh tokens from a vender
 `)
 	os.Exit(2)
 }
@@ -46,9 +58,16 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
-	c, err := drive.NewFromEnv()
-	must(err)
 	ctx := context.Background()
+	var c *drive.Client
+	client := func() *drive.Client {
+		if c == nil {
+			var err error
+			c, err = drive.NewFromEnv()
+			must(err)
+		}
+		return c
+	}
 
 	switch os.Args[1] {
 	case "list":
@@ -56,7 +75,7 @@ func main() {
 		if len(os.Args) > 2 {
 			folder = os.Args[2]
 		}
-		files, err := c.ListFolder(ctx, folder)
+		files, err := client().ListFolder(ctx, folder)
 		must(err)
 		for _, f := range files {
 			fmt.Printf("%-24s %-8s %s\n", val(f.Token), val(f.Type), val(f.Name))
@@ -69,7 +88,7 @@ func main() {
 		if len(os.Args) > 3 {
 			parent = os.Args[3]
 		}
-		token, err := c.CreateFolder(ctx, os.Args[2], parent)
+		token, err := client().CreateFolder(ctx, os.Args[2], parent)
 		must(err)
 		fmt.Println(token)
 	case "upload":
@@ -80,7 +99,7 @@ func main() {
 		if len(os.Args) > 3 {
 			folder = os.Args[3]
 		}
-		res, err := c.Upload(ctx, os.Args[2], folder, "")
+		res, err := client().Upload(ctx, os.Args[2], folder, "")
 		must(err)
 		fmt.Printf("%s (version=%s)\n", res.FileToken, res.Version)
 	case "download":
@@ -91,7 +110,7 @@ func main() {
 		if len(os.Args) > 3 {
 			out = os.Args[3]
 		}
-		must(c.Download(ctx, os.Args[2], out))
+		must(client().Download(ctx, os.Args[2], out))
 	case "rm":
 		if len(os.Args) < 3 {
 			usage()
@@ -100,7 +119,7 @@ func main() {
 		if len(os.Args) > 3 {
 			typ = os.Args[3]
 		}
-		must(c.Delete(ctx, os.Args[2], typ))
+		must(client().Delete(ctx, os.Args[2], typ))
 	case "pull":
 		if len(os.Args) < 4 {
 			usage()
@@ -109,7 +128,7 @@ func main() {
 		if len(os.Args) > 4 {
 			mode = drive.PullMode(os.Args[4])
 		}
-		res, err := c.Pull(ctx, os.Args[2], os.Args[3], mode)
+		res, err := client().Pull(ctx, os.Args[2], os.Args[3], mode)
 		must(err)
 		for _, e := range res.Errors {
 			fmt.Fprintf(os.Stderr, "failed: %s: %v\n", e.RelPath, e.Err)
@@ -123,7 +142,7 @@ func main() {
 		if len(os.Args) < 4 {
 			usage()
 		}
-		cache, err := newCache(c)
+		cache, err := newCache(client())
 		must(err)
 		p, err := cache.Get(ctx, os.Args[2], os.Args[3])
 		must(err)
@@ -136,14 +155,65 @@ func main() {
 		if len(os.Args) > 3 {
 			addr = os.Args[3]
 		}
-		cache, err := newCache(c)
+		cache, err := newCache(client())
 		must(err)
-		srv := server.New(cache, os.Args[2])
-		fmt.Printf("serving %s on %s\n", os.Args[2], addr)
+		secret := os.Getenv("LARKPAN_SIGN_SECRET")
+		srv := server.New(cache, os.Args[2], secret)
+		fmt.Printf("serving %s on %s (auth=%v)\n", os.Args[2], addr, secret != "")
 		must(http.ListenAndServe(addr, srv))
+	case "sign":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		secret := os.Getenv("LARKPAN_SIGN_SECRET")
+		if secret == "" {
+			fmt.Fprintln(os.Stderr, "sign requires LARKPAN_SIGN_SECRET")
+			os.Exit(2)
+		}
+		ttl := int64(3600)
+		if len(os.Args) > 3 {
+			v, err := strconv.ParseInt(os.Args[3], 10, 64)
+			must(err)
+			ttl = v
+		}
+		exp := time.Now().Unix() + ttl
+		p := "/files/" + strings.Trim(os.Args[2], "/")
+		fmt.Printf("%s?expires=%d&sig=%s\n", p, exp, sign.Token(secret, p, exp))
+		fmt.Fprintf(os.Stderr, "expires at %s\n", time.Unix(exp, 0))
+	case "token":
+		id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET")
+		if id == "" || sec == "" {
+			fmt.Fprintln(os.Stderr, "token requires LARK_APP_ID/LARK_APP_SECRET")
+			os.Exit(2)
+		}
+		v := server.NewTokenVender(id, sec, apiBase())
+		tok, _, err := v.Mint()
+		must(err)
+		fmt.Println(tok)
+	case "token-serve":
+		addr := ":9090"
+		if len(os.Args) > 2 {
+			addr = os.Args[2]
+		}
+		id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET")
+		if id == "" || sec == "" {
+			fmt.Fprintln(os.Stderr, "token-serve requires LARK_APP_ID/LARK_APP_SECRET")
+			os.Exit(2)
+		}
+		v := server.NewTokenVender(id, sec, apiBase())
+		fmt.Printf("vending tokens on %s\n", addr)
+		must(http.ListenAndServe(addr, v))
 	default:
 		usage()
 	}
+}
+
+// apiBase returns the OpenAPI base URL matching LARK_DOMAIN.
+func apiBase() string {
+	if os.Getenv("LARK_DOMAIN") == "lark" {
+		return "https://open.larksuite.com"
+	}
+	return "https://open.feishu.cn"
 }
 
 // newCache builds the read-through cache from env:
