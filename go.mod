@@ -12,6 +12,7 @@ require (
 	github.com/geoffgarside/ber v1.1.0 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/grandcat/zeroconf v1.0.0 // indirect
+	github.com/hirochachacha/go-smb2 v1.1.0 // indirect
 	github.com/macos-fuse-t/go-smb2 v0.0.0-20260921092600-277a93004112 // indirect
 	github.com/miekg/dns v1.1.56 // indirect
 	github.com/pkg/xattr v0.4.9 // indirect

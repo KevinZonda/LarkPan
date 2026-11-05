@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -86,6 +87,16 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s %s", r.Method, r.URL)
+	// Windows WebClient (net use) probes OPTIONS on the server root to
+	// detect DAV support; answer globally so mounts resolve.
+	if r.Method == http.MethodOptions {
+		w.Header().Set("DAV", "1,2")
+		w.Header().Set("MS-Author-Via", "DAV")
+		w.Header().Set("Allow", "OPTIONS, PROPFIND, GET, HEAD")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 

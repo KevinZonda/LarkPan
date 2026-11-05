@@ -21,6 +21,7 @@ import (
 	"larkpan/internal/mount"
 	"larkpan/internal/server"
 	"larkpan/internal/sign"
+	"larkpan/internal/smb"
 )
 
 func usage() {
@@ -171,6 +172,29 @@ func main() {
 		srv := server.New(cache, os.Args[2], secret, vend)
 		fmt.Printf("serving %s on %s (auth=%v vend=%v)\n", os.Args[2], addr, secret != "", vend != nil)
 		must(http.ListenAndServe(addr, srv))
+	case "smb":
+		// larkpan smb <folder_token> [addr] — share the tree over SMB2/3
+		// (read-only). Credentials: LARK_SMB_USER / LARK_SMB_PASSWORD
+		// (defaults larkpan/larkpan — set them!). Port 445 needs root.
+		if len(os.Args) < 3 {
+			usage()
+		}
+		addr := ":445"
+		if len(os.Args) > 3 {
+			addr = os.Args[3]
+		}
+		user := os.Getenv("LARK_SMB_USER")
+		pw := os.Getenv("LARK_SMB_PASSWORD")
+		if user == "" {
+			user = "larkpan"
+		}
+		if pw == "" {
+			pw = "larkpan"
+		}
+		cache, err := newCache(client())
+		must(err)
+		fmt.Printf("smb share \\\\host\\larkpan on %s (user %s)\n", addr, user)
+		must(smb.Serve(addr, cache, os.Args[2], map[string]string{user: pw}))
 	case "sign":
 		if len(os.Args) < 3 {
 			usage()
