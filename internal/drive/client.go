@@ -58,10 +58,8 @@ func New(appID, appSecret string, opts Options) (*Client, error) {
 
 // NewFromEnv builds a Client. Credential precedence:
 //
-//	LARK_TENANT_TOKEN   - delegated token mode (sub-server, static token)
-//	LARK_TOKEN_URL      - delegated token mode (fetches {tenant_access_token,
-//	                      expire} JSON from a central vend endpoint, auto-refresh)
-//	LARK_APP_ID/SECRET  - central/publisher mode (mints its own tokens)
+//	LARK_TENANT_TOKEN   - delegated token mode (static token, no app creds)
+//	LARK_APP_ID/SECRET  - app mode (mints its own tokens)
 //
 // LARK_DOMAIN selects feishu (default) vs lark; concurrency via
 // LARK_UPLOAD_CONCURRENCY / LARK_DOWNLOAD_CONCURRENCY.
@@ -75,9 +73,6 @@ func NewFromEnv() (*Client, error) {
 	}
 	if t := os.Getenv("LARK_TENANT_TOKEN"); t != "" {
 		return NewToken(staticToken{s: t}, opts)
-	}
-	if u := os.Getenv("LARK_TOKEN_URL"); u != "" {
-		return NewToken(newRemoteTokenSource(u, os.Getenv("LARK_VEND_KEY")), opts)
 	}
 	return New(os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"), opts)
 }

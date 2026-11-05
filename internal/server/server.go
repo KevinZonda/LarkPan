@@ -36,10 +36,8 @@ type Server struct {
 
 // New builds a Server exposing the tree rooted at rootFolderToken.
 // secret enables signed-URL auth on /files/ ("" = open access).
-// vend, when non-nil, mounts GET /token — the central role; unguarded by
-// the sign secret (edge nodes call it without client credentials).
 // /s3/ stays unauthenticated — protect it with a network boundary.
-func New(cache *drive.Cache, rootFolderToken, secret string, vend *TokenVender) *Server {
+func New(cache *drive.Cache, rootFolderToken, secret string) *Server {
 	s := &Server{cache: cache, root: rootFolderToken, secret: secret, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
@@ -53,9 +51,6 @@ func New(cache *drive.Cache, rootFolderToken, secret string, vend *TokenVender) 
 		FileSystem: newDAVFS(cache, rootFolderToken),
 		LockSystem: webdav.NewMemLS(),
 	}).ServeHTTP))
-	if vend != nil {
-		s.mux.Handle("/token", vend)
-	}
 	return s
 }
 

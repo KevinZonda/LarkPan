@@ -44,18 +44,15 @@ commands:
                                      /files/<path>  nginx-style files + JSON dir listing
                                      /s3/<bucket>/<key>  minimal S3 (bucket ignored, unauthenticated)
                                      default addr :8080
-  token                            print a fresh tenant_access_token
-  token-serve [addr]               vend tokens to sub-servers (GET /token)
-                                     default addr :9090; auth: APP_ID/SECRET env
   sign     <path> [ttl_seconds]    emit a signed /files/ URL (default ttl 3600)
                                      requires LARKPAN_SIGN_SECRET; serve uses
                                      the same env to enforce signatures
   token-create <label> [ttl]       mint a long-lived client token (default 30d)
-  client   login|mount|whoami      client-side auth + FUSE mount (linux)
+  client   login|mount|whoami|refresh
+                                     client-side auth + FUSE mount (linux)
 
 credential modes (sub-servers):
   LARK_TENANT_TOKEN=t-...          use a delegated token directly
-  LARK_TOKEN_URL=http://host:9090  fetch+refresh tokens from a vender
 `)
 	os.Exit(2)
 }
@@ -164,14 +161,8 @@ func main() {
 		cache, err := newCache(client())
 		must(err)
 		secret := os.Getenv("LARKPAN_SIGN_SECRET")
-		// Central+edge in one process: when app credentials are present,
-		// the same listener also vends tokens on /token.
-		var vend *server.TokenVender
-		if id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"); id != "" && sec != "" {
-			vend = server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
-		}
-		srv := server.New(cache, os.Args[2], secret, vend)
-		fmt.Printf("serving %s on %s (auth=%v vend=%v)\n", os.Args[2], addr, secret != "", vend != nil)
+		srv := server.New(cache, os.Args[2], secret)
+		fmt.Printf("serving %s on %s (auth=%v)\n", os.Args[2], addr, secret != "")
 		must(http.ListenAndServe(addr, srv))
 	case "smb":
 		// larkpan smb <folder_token> [addr] — share the tree over SMB2/3
@@ -215,16 +206,6 @@ func main() {
 		p := "/files/" + strings.Trim(os.Args[2], "/")
 		fmt.Printf("%s?expires=%d&sig=%s\n", p, exp, sign.Token(secret, p, exp))
 		fmt.Fprintf(os.Stderr, "expires at %s\n", time.Unix(exp, 0))
-	case "token":
-		id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET")
-		if id == "" || sec == "" {
-			fmt.Fprintln(os.Stderr, "token requires LARK_APP_ID/LARK_APP_SECRET")
-			os.Exit(2)
-		}
-		v := server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
-		tok, _, err := v.Mint()
-		must(err)
-		fmt.Println(tok)
 	case "token-create":
 		// larkpan token-create <label> [ttl_seconds] — mint a long-lived
 		// client token signed by LARKPAN_SIGN_SECRET.
@@ -247,19 +228,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "expires at %s\n", time.Unix(exp, 0))
 	case "client":
 		clientCmd(ctx)
-	case "token-serve":
-		addr := ":9090"
-		if len(os.Args) > 2 {
-			addr = os.Args[2]
-		}
-		id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET")
-		if id == "" || sec == "" {
-			fmt.Fprintln(os.Stderr, "token-serve requires LARK_APP_ID/LARK_APP_SECRET")
-			os.Exit(2)
-		}
-		v := server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
-		fmt.Printf("vending tokens on %s\n", addr)
-		must(http.ListenAndServe(addr, v))
 	default:
 		usage()
 	}
