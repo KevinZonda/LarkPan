@@ -28,21 +28,24 @@ import (
 
 // Server serves a single remote Drive folder tree.
 type Server struct {
-	cache  *drive.Cache
-	root   string // root folder token
-	secret string // edge signing secret; "" = open access
-	mux    *http.ServeMux
+	cache    *drive.Cache
+	root     string // root folder token
+	secret   string // edge signing secret; "" = open access
+	adminKey string // separate key for /admin/* ("" = admin API disabled)
+	mux      *http.ServeMux
 }
 
 // New builds a Server exposing the tree rooted at rootFolderToken.
 // secret enables signed-URL auth on /files/ ("" = open access).
 // /s3/ stays unauthenticated — protect it with a network boundary.
-func New(cache *drive.Cache, rootFolderToken, secret string) *Server {
-	s := &Server{cache: cache, root: rootFolderToken, secret: secret, mux: http.NewServeMux()}
+// adminKey enables POST /admin/tokens for remote client-token issuance.
+func New(cache *drive.Cache, rootFolderToken, secret, adminKey string) *Server {
+	s := &Server{cache: cache, root: rootFolderToken, secret: secret, adminKey: adminKey, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
 	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
 	s.mux.HandleFunc("/refresh", s.guard(s.handleRefresh))
+	s.mux.HandleFunc("/admin/tokens", s.handleAdminTokens)
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
 	// WebDAV mount point (read-only): net use Z: http://host/dav/
@@ -94,6 +97,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// handleAdminTokens mints lp_ client tokens. Requires X-Admin-Key so
+// LARKPAN_SIGN_SECRET never has to leave the server; operators hold the
+// narrower admin credential. Issuance is logged for audit.
+func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
+	if s.adminKey == "" || r.Method != http.MethodPost {
+		http.Error(w, "admin api disabled", http.StatusForbidden)
+		return
+	}
+	if r.Header.Get("X-Admin-Key") != s.adminKey {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Label string `json:"label"`
+		TTL   int64  `json:"ttl"` // seconds; 0 = 30d
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Label == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.TTL <= 0 {
+		req.TTL = 30 * 24 * 3600
+	}
+	exp := time.Now().Unix() + req.TTL
+	log.Printf("admin: issued token label=%q exp=%d from=%s", req.Label, exp, r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":   sign.ClientToken(s.secret, req.Label, exp),
+		"expires": exp,
+	})
 }
 
 // handleRefresh re-signs a live bearer token with a fresh 30d expiry.

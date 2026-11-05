@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -161,8 +162,9 @@ func main() {
 		cache, err := newCache(client())
 		must(err)
 		secret := os.Getenv("LARKPAN_SIGN_SECRET")
-		srv := server.New(cache, os.Args[2], secret)
-		fmt.Printf("serving %s on %s (auth=%v)\n", os.Args[2], addr, secret != "")
+		admin := os.Getenv("LARKPAN_ADMIN_KEY")
+		srv := server.New(cache, os.Args[2], secret, admin)
+		fmt.Printf("serving %s on %s (auth=%v admin=%v)\n", os.Args[2], addr, secret != "", admin != "")
 		must(http.ListenAndServe(addr, srv))
 	case "smb":
 		// larkpan smb <folder_token> [addr] — share the tree over SMB2/3
@@ -290,6 +292,41 @@ func clientCmd(ctx context.Context) {
 		cfg.Token = out.Token
 		must(cfg.Save())
 		fmt.Println("refreshed, expires", time.Unix(out.Expires, 0))
+	case "token":
+		// larkpan client token <label> [ttl] — request a token from the
+		// server's /admin/tokens using LARKPAN_ADMIN_KEY; saves it to the
+		// stored config (also logs you in).
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "usage: larkpan client token <label> [ttl_seconds]")
+			os.Exit(2)
+		}
+		admin := os.Getenv("LARKPAN_ADMIN_KEY")
+		if admin == "" {
+			fmt.Fprintln(os.Stderr, "token requires LARKPAN_ADMIN_KEY")
+			os.Exit(2)
+		}
+		cfg, err := client.Load()
+		must(err)
+		ttl := int64(0)
+		if len(os.Args) > 4 {
+			ttl, err = strconv.ParseInt(os.Args[4], 10, 64)
+			must(err)
+		}
+		body, _ := json.Marshal(map[string]any{"label": os.Args[3], "ttl": ttl})
+		req, err := http.NewRequest(http.MethodPost, cfg.Server+"/admin/tokens", bytes.NewReader(body))
+		must(err)
+		req.Header.Set("X-Admin-Key", admin)
+		resp, err := http.DefaultClient.Do(req)
+		must(err)
+		defer resp.Body.Close()
+		var out struct {
+			Token   string `json:"token"`
+			Expires int64  `json:"expires"`
+		}
+		must(json.NewDecoder(resp.Body).Decode(&out))
+		cfg.Token = out.Token
+		must(cfg.Save())
+		fmt.Println("token saved, expires", time.Unix(out.Expires, 0))
 	case "whoami":
 		cfg, err := client.Load()
 		must(err)
