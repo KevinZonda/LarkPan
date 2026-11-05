@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/webdav"
+
 	"larkpan/internal/drive"
 	"larkpan/internal/sign"
 )
@@ -43,6 +45,12 @@ func New(cache *drive.Cache, rootFolderToken, secret string, vend *TokenVender) 
 	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
+	// WebDAV mount point (read-only): net use Z: http://host/dav/
+	s.mux.Handle("/dav/", s.guard((&webdav.Handler{
+		Prefix:     "/dav",
+		FileSystem: newDAVFS(cache, rootFolderToken),
+		LockSystem: webdav.NewMemLS(),
+	}).ServeHTTP))
 	if vend != nil {
 		s.mux.Handle("/token", vend)
 	}
@@ -62,10 +70,17 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 			h(w, r)
 			return
 		}
+		// net use / WebDAV clients send Basic credentials after a 401
+		// challenge; accept an lp_ token in the password field.
+		if _, pw, ok := r.BasicAuth(); ok && sign.ValidBearer(s.secret, pw, now) {
+			h(w, r)
+			return
+		}
 		if sign.Valid(s.secret, r, now) {
 			h(w, r)
 			return
 		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="larkpan"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
