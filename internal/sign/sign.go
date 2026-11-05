@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,7 +46,7 @@ func ClientToken(secret, label string, expiresAt int64) string {
 	body := "client\x00" + label + "\x00" + strconv.FormatInt(expiresAt, 10)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(body))
-	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+	sig := clientSig(secret, label, expiresAt)
 	return "lp_" + label + "_" + strconv.FormatInt(expiresAt, 10) + "_" + sig
 }
 
@@ -70,9 +71,11 @@ func ValidBearer(secret, token string, now time.Time) bool {
 		hmac.Equal([]byte(clientSig(secret, label, exp)), []byte(sig))
 }
 
+// clientSig is hex (not base64) so the sig can never contain "_" —
+// ValidBearer splits fields on "_" and a b64 sig would corrupt them.
 func clientSig(secret, label string, expiresAt int64) string {
 	body := "client\x00" + label + "\x00" + strconv.FormatInt(expiresAt, 10)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(body))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
