@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"larkpan/internal/client"
 	"larkpan/internal/drive"
+	"larkpan/internal/mount"
 	"larkpan/internal/server"
 	"larkpan/internal/sign"
 )
@@ -46,6 +48,8 @@ commands:
   sign     <path> [ttl_seconds]    emit a signed /files/ URL (default ttl 3600)
                                      requires LARKPAN_SIGN_SECRET; serve uses
                                      the same env to enforce signatures
+  token-create <label> [ttl]       mint a long-lived client token (default 30d)
+  client   login|mount|whoami      client-side auth + FUSE mount (linux)
 
 credential modes (sub-servers):
   LARK_TENANT_TOKEN=t-...          use a delegated token directly
@@ -158,8 +162,14 @@ func main() {
 		cache, err := newCache(client())
 		must(err)
 		secret := os.Getenv("LARKPAN_SIGN_SECRET")
-		srv := server.New(cache, os.Args[2], secret)
-		fmt.Printf("serving %s on %s (auth=%v)\n", os.Args[2], addr, secret != "")
+		// Central+edge in one process: when app credentials are present,
+		// the same listener also vends tokens on /token.
+		var vend *server.TokenVender
+		if id, sec := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"); id != "" && sec != "" {
+			vend = server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
+		}
+		srv := server.New(cache, os.Args[2], secret, vend)
+		fmt.Printf("serving %s on %s (auth=%v vend=%v)\n", os.Args[2], addr, secret != "", vend != nil)
 		must(http.ListenAndServe(addr, srv))
 	case "sign":
 		if len(os.Args) < 3 {
@@ -186,10 +196,32 @@ func main() {
 			fmt.Fprintln(os.Stderr, "token requires LARK_APP_ID/LARK_APP_SECRET")
 			os.Exit(2)
 		}
-		v := server.NewTokenVender(id, sec, apiBase())
+		v := server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
 		tok, _, err := v.Mint()
 		must(err)
 		fmt.Println(tok)
+	case "token-create":
+		// larkpan token-create <label> [ttl_seconds] — mint a long-lived
+		// client token signed by LARKPAN_SIGN_SECRET.
+		if len(os.Args) < 3 {
+			usage()
+		}
+		secret := os.Getenv("LARKPAN_SIGN_SECRET")
+		if secret == "" {
+			fmt.Fprintln(os.Stderr, "token-create requires LARKPAN_SIGN_SECRET")
+			os.Exit(2)
+		}
+		ttl := int64(30 * 24 * 3600) // 30 days
+		if len(os.Args) > 3 {
+			v, err := strconv.ParseInt(os.Args[3], 10, 64)
+			must(err)
+			ttl = v
+		}
+		exp := time.Now().Unix() + ttl
+		fmt.Println(sign.ClientToken(secret, os.Args[2], exp))
+		fmt.Fprintf(os.Stderr, "expires at %s\n", time.Unix(exp, 0))
+	case "client":
+		clientCmd(ctx)
 	case "token-serve":
 		addr := ":9090"
 		if len(os.Args) > 2 {
@@ -200,12 +232,63 @@ func main() {
 			fmt.Fprintln(os.Stderr, "token-serve requires LARK_APP_ID/LARK_APP_SECRET")
 			os.Exit(2)
 		}
-		v := server.NewTokenVender(id, sec, apiBase())
+		v := server.NewTokenVender(id, sec, apiBase(), os.Getenv("LARK_VEND_KEY"))
 		fmt.Printf("vending tokens on %s\n", addr)
 		must(http.ListenAndServe(addr, v))
 	default:
 		usage()
 	}
+}
+
+// clientCmd implements `larkpan client <sub>`:
+//
+//	client login --server <url> --token <lp_...>   save credentials to
+//	                                               ~/.config/kevinzonda.larkpan/token
+//	client mount <dir>                             FUSE-mount the remote tree
+//	                                               (linux only)
+//	client whoami                                  show saved config
+func clientCmd(ctx context.Context) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: larkpan client login|mount|whoami ...")
+		os.Exit(2)
+	}
+	switch os.Args[2] {
+	case "login":
+		var srvURL, tok string
+		for i := 3; i+1 < len(os.Args); i += 2 {
+			switch os.Args[i] {
+			case "--server":
+				srvURL = os.Args[i+1]
+			case "--token":
+				tok = os.Args[i+1]
+			}
+		}
+		if srvURL == "" || tok == "" {
+			fmt.Fprintln(os.Stderr, "login requires --server and --token")
+			os.Exit(2)
+		}
+		cfg := &client.Config{Server: strings.TrimRight(srvURL, "/"), Token: tok}
+		must(cfg.Save())
+		p, _ := client.Path()
+		fmt.Println("saved to", p)
+	case "mount":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "usage: larkpan client mount <dir>")
+			os.Exit(2)
+		}
+		cfg, err := client.Load()
+		must(err)
+		fmt.Printf("mounting %s at %s (ctrl-c to unmount)\n", cfg.Server, os.Args[3])
+		must(mount.Mount(&mount.Client{Base: cfg.Server, Token: cfg.Token}, os.Args[3]))
+	case "whoami":
+		cfg, err := client.Load()
+		must(err)
+		fmt.Printf("server: %s\ntoken:  %s...%s\n", cfg.Server, cfg.Token[:min(10, len(cfg.Token))], cfg.Token[max(0, len(cfg.Token)-8):])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: larkpan client login|mount|whoami ...")
+		os.Exit(2)
+	}
+	_ = ctx
 }
 
 // apiBase returns the OpenAPI base URL matching LARK_DOMAIN.

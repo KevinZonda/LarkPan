@@ -77,7 +77,7 @@ func NewFromEnv() (*Client, error) {
 		return NewToken(staticToken{s: t}, opts)
 	}
 	if u := os.Getenv("LARK_TOKEN_URL"); u != "" {
-		return NewToken(newRemoteTokenSource(u), opts)
+		return NewToken(newRemoteTokenSource(u, os.Getenv("LARK_VEND_KEY")), opts)
 	}
 	return New(os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET"), opts)
 }

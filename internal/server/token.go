@@ -20,6 +20,7 @@ type TokenVender struct {
 	appID     string
 	appSecret string
 	tokenURL  string // Feishu tenant_access_token endpoint
+	vendKey   string // optional shared key; "" = open (bind trusted net!)
 
 	mu   sync.Mutex
 	tok  string
@@ -29,11 +30,14 @@ type TokenVender struct {
 
 // NewTokenVender builds a vender for the given app credentials.
 // base is the OpenAPI host (e.g. https://open.feishu.cn).
-func NewTokenVender(appID, appSecret, base string) *TokenVender {
+// vendKey, when non-empty, requires requests to carry the same value in
+// the X-Vend-Key header.
+func NewTokenVender(appID, appSecret, base, vendKey string) *TokenVender {
 	return &TokenVender{
 		appID:     appID,
 		appSecret: appSecret,
 		tokenURL:  base + "/open-apis/auth/v3/tenant_access_token/internal",
+		vendKey:   vendKey,
 		http:      &http.Client{Timeout: 15 * time.Second},
 	}
 }
@@ -41,6 +45,10 @@ func NewTokenVender(appID, appSecret, base string) *TokenVender {
 func (v *TokenVender) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/token" {
 		http.NotFound(w, r)
+		return
+	}
+	if v.vendKey != "" && r.Header.Get("X-Vend-Key") != v.vendKey {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	tok, expireIn, err := v.Mint()

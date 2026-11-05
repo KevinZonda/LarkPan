@@ -33,25 +33,40 @@ type Server struct {
 
 // New builds a Server exposing the tree rooted at rootFolderToken.
 // secret enables signed-URL auth on /files/ ("" = open access).
+// vend, when non-nil, mounts GET /token — the central role; unguarded by
+// the sign secret (edge nodes call it without client credentials).
 // /s3/ stays unauthenticated — protect it with a network boundary.
-func New(cache *drive.Cache, rootFolderToken, secret string) *Server {
+func New(cache *drive.Cache, rootFolderToken, secret string, vend *TokenVender) *Server {
 	s := &Server{cache: cache, root: rootFolderToken, secret: secret, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
 	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
+	if vend != nil {
+		s.mux.Handle("/token", vend)
+	}
 	return s
 }
 
-// guard enforces signed-URL auth when a secret is configured.
+// guard enforces auth when a secret is configured: either a signed URL
+// (?expires&sig) or a bearer client token (Authorization: Bearer lp_...).
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.secret != "" && !sign.Valid(s.secret, r, time.Now()) {
-			http.Error(w, "invalid or expired signature", http.StatusUnauthorized)
+		if s.secret == "" {
+			h(w, r)
 			return
 		}
-		h(w, r)
+		now := time.Now()
+		if b := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); b != "" && sign.ValidBearer(s.secret, b, now) {
+			h(w, r)
+			return
+		}
+		if sign.Valid(s.secret, r, now) {
+			h(w, r)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 

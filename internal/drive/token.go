@@ -26,11 +26,12 @@ func (t staticToken) token(context.Context) (string, error) { return t.s, nil }
 // (GET -> {"tenant_access_token": "...", "expire": <seconds>}) and
 // caches them until shortly before expiry.
 type remoteTokenSource struct {
-	url    string
-	mu     sync.Mutex
-	tok    string
-	exp    time.Time
-	client *http.Client
+	url     string
+	vendKey string // sent as X-Vend-Key when the vender requires one
+	mu      sync.Mutex
+	tok     string
+	exp     time.Time
+	client  *http.Client
 }
 
 // vendResponse mirrors Feishu's tenant_access_token response shape.
@@ -40,15 +41,16 @@ type vendResponse struct {
 	Msg               string `json:"msg"`
 }
 
-func newRemoteTokenSource(url string) *remoteTokenSource {
+func newRemoteTokenSource(url, vendKey string) *remoteTokenSource {
 	// Accept a bare host[:port] and default to the /token endpoint.
 	if u, err := nurl.Parse(url); err == nil && (u.Path == "" || u.Path == "/") {
 		u.Path = "/token"
 		url = u.String()
 	}
 	return &remoteTokenSource{
-		url:    url,
-		client: &http.Client{Timeout: 15 * time.Second},
+		url:     url,
+		vendKey: vendKey,
+		client:  &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -61,6 +63,9 @@ func (s *remoteTokenSource) token(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
 	if err != nil {
 		return "", err
+	}
+	if s.vendKey != "" {
+		req.Header.Set("X-Vend-Key", s.vendKey)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
