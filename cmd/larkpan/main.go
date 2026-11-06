@@ -12,12 +12,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"larkpan/internal/bot"
 	"larkpan/internal/client"
 	"larkpan/internal/drive"
 	"larkpan/internal/mount"
@@ -49,8 +51,10 @@ commands:
                                      requires LARKPAN_SIGN_SECRET; serve uses
                                      the same env to enforce signatures
   token-create <label> [ttl]       mint a long-lived client token (default 30d)
-  client   login|mount|whoami|refresh
-                                     client-side auth + FUSE mount (linux)
+  client   login|mount|whoami|refresh|token
+                                     login --server <url> [--token lp_...]
+                                     (no --token = Feishu-bot pairing; needs
+                                     serve running with LARKPAN_BOT=1)
 
 credential modes (sub-servers):
   LARK_TENANT_TOKEN=t-...          use a delegated token directly
@@ -163,8 +167,24 @@ func main() {
 		must(err)
 		secret := os.Getenv("LARKPAN_SIGN_SECRET")
 		admin := os.Getenv("LARKPAN_ADMIN_KEY")
-		srv := server.New(cache, os.Args[2], secret, admin)
-		fmt.Printf("serving %s on %s (auth=%v admin=%v)\n", os.Args[2], addr, secret != "", admin != "")
+		var logins *bot.LoginStore
+		if os.Getenv("LARKPAN_BOT") != "" {
+			appID, appSecret := os.Getenv("LARK_APP_ID"), os.Getenv("LARK_APP_SECRET")
+			if appID == "" || appSecret == "" {
+				fmt.Fprintln(os.Stderr, "LARKPAN_BOT set but LARK_APP_ID/SECRET missing; bot disabled")
+			} else {
+				logins = bot.NewLoginStore()
+				allow := strings.Split(os.Getenv("LARKPAN_BOT_ALLOW"), ",")
+				b := bot.New(appID, appSecret, apiBase(), client().Raw(), secret, allow, logins)
+				go func() {
+					if err := b.Run(ctx); err != nil {
+						log.Printf("bot: %v", err)
+					}
+				}()
+			}
+		}
+		srv := server.New(cache, os.Args[2], secret, admin, logins)
+		fmt.Printf("serving %s on %s (auth=%v admin=%v bot=%v)\n", os.Args[2], addr, secret != "", admin != "", logins != nil)
 		must(http.ListenAndServe(addr, srv))
 	case "smb":
 		// larkpan smb <folder_token> [addr] — share the tree over SMB2/3
@@ -258,9 +278,12 @@ func clientCmd(ctx context.Context) {
 				tok = os.Args[i+1]
 			}
 		}
-		if srvURL == "" || tok == "" {
-			fmt.Fprintln(os.Stderr, "login requires --server and --token")
+		if srvURL == "" {
+			fmt.Fprintln(os.Stderr, "login requires --server")
 			os.Exit(2)
+		}
+		if tok == "" {
+			tok = botPairLogin(srvURL)
 		}
 		cfg := &client.Config{Server: strings.TrimRight(srvURL, "/"), Token: tok}
 		must(cfg.Save())
@@ -336,6 +359,53 @@ func clientCmd(ctx context.Context) {
 		os.Exit(2)
 	}
 	_ = ctx
+}
+
+// botPairLogin runs the Feishu-bot pairing flow: POST /auth/pair for a
+// code, ask the user to DM `login <code>` to the bot, then poll
+// /auth/poll until the server delivers the issued token.
+func botPairLogin(srvURL string) string {
+	base := strings.TrimRight(srvURL, "/")
+	resp, err := http.Post(base+"/auth/pair", "application/json", nil)
+	must(err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "server has no Feishu-bot login (LARKPAN_BOT); pass --token or ask an operator for `client token`")
+		os.Exit(1)
+	}
+	var pair struct {
+		Code string `json:"code"`
+	}
+	must(json.NewDecoder(resp.Body).Decode(&pair))
+	fmt.Printf("请在飞书中给 LarkPan 机器人发一条消息： login %s\n", pair.Code)
+	fmt.Print("等待授权")
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		fmt.Print(".")
+		p, err := http.Get(base + "/auth/poll?state=" + pair.Code)
+		if err != nil {
+			continue
+		}
+		var out struct {
+			Status  string `json:"status"`
+			Token   string `json:"token"`
+			Expires int64  `json:"expires"`
+		}
+		json.NewDecoder(p.Body).Decode(&out)
+		p.Body.Close()
+		switch {
+		case p.StatusCode == http.StatusNotFound:
+			fmt.Println("\n配对码已过期")
+			os.Exit(1)
+		case out.Status == "ok" && out.Token != "":
+			fmt.Printf("\n已授权，token 到期 %s\n", time.Unix(out.Expires, 0).Format("2006-01-02"))
+			return out.Token
+		}
+	}
+	fmt.Println("\n等待超时")
+	os.Exit(1)
+	return ""
 }
 
 // apiBase returns the OpenAPI base URL matching LARK_DOMAIN.

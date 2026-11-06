@@ -88,6 +88,9 @@ func NewToken(ts tokenSource, opts Options) (*Client, error) {
 	return c, nil
 }
 
+// Raw returns the underlying SDK client (e.g. for im APIs in bot mode).
+func (c *Client) Raw() *lark.Client { return c.raw }
+
 // reqOpts returns request options carrying the delegated token, if any.
 func (c *Client) reqOpts(ctx context.Context) ([]larkcore.RequestOptionFunc, error) {
 	if c.ts == nil {

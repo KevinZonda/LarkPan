@@ -15,6 +15,8 @@ require (
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/geoffgarside/ber v1.1.0 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect

@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/net/webdav"
 
+	"larkpan/internal/bot"
 	"larkpan/internal/drive"
 	"larkpan/internal/sign"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	root     string // root folder token
 	secret   string // edge signing secret; "" = open access
 	adminKey string // separate key for /admin/* ("" = admin API disabled)
+	logins   *bot.LoginStore // non-nil = Feishu-bot pairing endpoints on
 	mux      *http.ServeMux
 }
 
@@ -39,13 +41,16 @@ type Server struct {
 // secret enables signed-URL auth on /files/ ("" = open access).
 // /s3/ stays unauthenticated — protect it with a network boundary.
 // adminKey enables POST /admin/tokens for remote client-token issuance.
-func New(cache *drive.Cache, rootFolderToken, secret, adminKey string) *Server {
-	s := &Server{cache: cache, root: rootFolderToken, secret: secret, adminKey: adminKey, mux: http.NewServeMux()}
+// logins (may be nil) enables /auth/pair + /auth/poll for bot logins.
+func New(cache *drive.Cache, rootFolderToken, secret, adminKey string, logins *bot.LoginStore) *Server {
+	s := &Server{cache: cache, root: rootFolderToken, secret: secret, adminKey: adminKey, logins: logins, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/files/", s.guard(s.handleFiles))
 	s.mux.HandleFunc("/json/", s.guard(s.handleJSON))
 	s.mux.HandleFunc("/refresh", s.guard(s.handleRefresh))
 	s.mux.HandleFunc("/admin/tokens", s.handleAdminTokens)
+	s.mux.HandleFunc("/auth/pair", s.handleAuthPair)
+	s.mux.HandleFunc("/auth/poll", s.handleAuthPoll)
 	s.mux.HandleFunc("/s3/", s.handleS3)
 	s.mux.HandleFunc("/", s.index)
 	// WebDAV mount point (read-only): net use Z: http://host/dav/
@@ -129,6 +134,47 @@ func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
 		"token":   sign.ClientToken(s.secret, req.Label, exp),
 		"expires": exp,
 	})
+}
+
+// handleAuthPair hands out a pairing code for `client login`: the CLI
+// shows the code, the user DMs `login <code>` to the Feishu bot, and the
+// poll endpoint below delivers the token. Unauthenticated by design —
+// the bot conversation is the identity check. Codes die after 5 minutes.
+func (s *Server) handleAuthPair(w http.ResponseWriter, r *http.Request) {
+	if s.logins == nil || r.Method != http.MethodPost {
+		http.Error(w, "bot login disabled", http.StatusNotFound)
+		return
+	}
+	st := s.logins.Create()
+	if st == nil {
+		http.Error(w, "too many pending logins", http.StatusTooManyRequests)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"code": st.Code, "expires": st.Expires.Unix()})
+}
+
+// handleAuthPoll lets the CLI wait for the bot pairing to complete:
+// pending → {"status":"pending"}; done → the token, single-use.
+func (s *Server) handleAuthPoll(w http.ResponseWriter, r *http.Request) {
+	if s.logins == nil {
+		http.Error(w, "bot login disabled", http.StatusNotFound)
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("state")))
+	if st, ok := s.logins.Redeem(code); ok {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "token": st.Token, "label": st.Label, "expires": st.TokenExp,
+		})
+		return
+	}
+	if _, ok := s.logins.Get(code); !ok {
+		http.Error(w, `{"status":"unknown"}`, http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
 }
 
 // handleRefresh re-signs a live bearer token with a fresh 30d expiry.
